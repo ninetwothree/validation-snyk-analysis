@@ -11,7 +11,8 @@ Use this file when an agent needs to decide whether a project fits this analysis
 ## What this workflow does
 
 - Installs a pinned Snyk CLI and verifies its SHA-256 checksum
-- Optionally sets up Node.js / Python and installs dependencies
+- Verifies `SNYK_TOKEN` with `snyk whoami` before any scan
+- Optionally sets up Python and installs dependencies
 - Runs `snyk test --all-projects` and collects JSON and SARIF results
 - Runs `snyk monitor --all-projects` on non-PR events so projects appear in the Snyk UI, grouped by branch through `--target-reference`
 - Optionally runs `snyk code test` (SAST)
@@ -54,11 +55,11 @@ Optional inputs agents may override:
 - `project_lifecycle`
 - `project_business_criticality`
 - `project_tags`
-- `node_version`
-- `enable_corepack`
 - `python_version`
 - `install_command`
 - `snyk_cli_version`
+- `force_legacy_cli`
+- `scan_timeout_minutes`
 - `summary_max_issues`
 - `artifact_name`
 - `runner`
@@ -79,7 +80,7 @@ Optional GitHub variables:
 Agents should only use this workflow when all of the following are true:
 
 - The repository contains at least one manifest supported by Snyk Open Source (for example `package.json` with a lockfile, `requirements.txt`, `pyproject.toml` with `poetry.lock`, `build.gradle(.kts)`, `pom.xml`, `go.mod`).
-- Ecosystems that need installed dependencies to resolve the dependency tree (pip `requirements.txt`, Gradle, Maven) have the matching toolchain on the runner or through `node_version` / `python_version` / `install_command`.
+- Ecosystems that need installed dependencies to resolve the dependency tree (pip `requirements.txt`, Gradle, Maven) have the matching toolchain on the runner or through `python_version` / `install_command`.
 - The caller repository has `SNYK_TOKEN` configured.
 
 ## When agents should not use this workflow

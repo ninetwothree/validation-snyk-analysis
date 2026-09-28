@@ -52,7 +52,11 @@ secrets:
 
 ## Ecosystems that need installed dependencies
 
-Most lockfile-based ecosystems (npm, Yarn, Poetry, Go modules) are analysed directly from the lockfile. Some ecosystems need the toolchain and installed dependencies:
+JavaScript lockfiles (npm, Yarn, pnpm) and Go modules are analysed directly from the lockfile.
+
+Python projects need a `python` command on the runner, even for `poetry.lock`. The workflow uses the runner Python by default; pin a version when the project requires a specific one.
+
+pip `requirements.txt` projects additionally need installed dependencies:
 
 ```yaml
 with:
@@ -60,12 +64,7 @@ with:
   install_command: pip install -r requirements.txt
 ```
 
-```yaml
-with:
-  node_version: "22.14.0"
-  enable_corepack: true
-  install_command: yarn install --immutable
-```
+The runner already has Node.js, so a JavaScript project without a lockfile only needs `install_command: npm install`.
 
 ## Monorepos
 
