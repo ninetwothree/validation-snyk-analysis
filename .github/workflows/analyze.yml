@@ -168,7 +168,7 @@ jobs:
       WORKING_DIRECTORY: ${{ inputs.working_directory }}
       SCAN_TIMEOUT_MINUTES: ${{ inputs.scan_timeout_minutes }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Resolve analysis configuration
         id: config
