@@ -1,0 +1,675 @@
+name: Snyk Analysis
+
+on:
+  workflow_call:
+    inputs:
+      snyk_org:
+        description: Snyk organization slug or ID. When empty, the SNYK_ORG repository variable is used, then the default organization of the token.
+        required: false
+        type: string
+        default: ""
+      monitor:
+        description: Whether to publish a snapshot to the Snyk UI with snyk monitor. Always skipped for pull_request events.
+        required: false
+        type: boolean
+        default: true
+      target_reference:
+        description: Snyk target reference used to group projects by branch. When empty, the current branch name is used.
+        required: false
+        type: string
+        default: ""
+      severity_threshold:
+        description: Minimum severity counted as blocking (low, medium, high, critical).
+        required: false
+        type: string
+        default: high
+      fail_on_issues:
+        description: Whether to fail the job when issues at or above severity_threshold are found.
+        required: false
+        type: boolean
+        default: false
+      enable_code_scan:
+        description: Whether to run Snyk Code (SAST) in addition to Snyk Open Source. Requires Snyk Code to be enabled for the Snyk organization.
+        required: false
+        type: boolean
+        default: false
+      working_directory:
+        description: Directory in the caller repository where the analysis runs.
+        required: false
+        type: string
+        default: "."
+      exclude:
+        description: Comma-separated directory or file names excluded from project detection (passed to --exclude).
+        required: false
+        type: string
+        default: ""
+      detection_depth:
+        description: How many subdirectory levels to search for manifests (passed to --detection-depth). When empty, the Snyk CLI default is used.
+        required: false
+        type: string
+        default: ""
+      additional_args:
+        description: Extra arguments appended to both snyk test and snyk monitor.
+        required: false
+        type: string
+        default: ""
+      project_environment:
+        description: Snyk project environment attribute set by snyk monitor (for example backend, frontend, mobile).
+        required: false
+        type: string
+        default: ""
+      project_lifecycle:
+        description: Snyk project lifecycle attribute set by snyk monitor (production, development, sandbox).
+        required: false
+        type: string
+        default: ""
+      project_business_criticality:
+        description: Snyk project business criticality attribute set by snyk monitor (critical, high, medium, low).
+        required: false
+        type: string
+        default: ""
+      project_tags:
+        description: Comma-separated key=value tags set on Snyk projects by snyk monitor.
+        required: false
+        type: string
+        default: ""
+      node_version:
+        description: Node.js version to install before the analysis. When empty, Node.js setup is skipped.
+        required: false
+        type: string
+        default: ""
+      enable_corepack:
+        description: Whether to enable Corepack before installing dependencies.
+        required: false
+        type: boolean
+        default: false
+      python_version:
+        description: Python version to install before the analysis. When empty, Python setup is skipped.
+        required: false
+        type: string
+        default: ""
+      install_command:
+        description: Optional dependency installation command executed in working_directory before the analysis.
+        required: false
+        type: string
+        default: ""
+      snyk_cli_version:
+        description: Snyk CLI version to install. The binary is verified against the published SHA-256 checksum.
+        required: false
+        type: string
+        default: "1.1307.4"
+      summary_max_issues:
+        description: Maximum number of issues listed in the job summary.
+        required: false
+        type: string
+        default: "50"
+      artifact_name:
+        description: Name of the uploaded artifact with raw Snyk results. Must be unique when the workflow is called more than once in one run.
+        required: false
+        type: string
+        default: snyk-results
+      runner:
+        description: Optional runner override. When omitted, ninetwothree repositories use ubuntu-24-arm-runner and other repositories use ubuntu-24.04-arm.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      SNYK_TOKEN:
+        description: Snyk API token (service account token recommended).
+        required: false
+    outputs:
+      issues_count:
+        description: Number of unique Snyk Open Source issues.
+        value: ${{ jobs.analyze.outputs.issues_count }}
+      critical_count:
+        description: Number of unique critical Snyk Open Source issues.
+        value: ${{ jobs.analyze.outputs.critical_count }}
+      high_count:
+        description: Number of unique high Snyk Open Source issues.
+        value: ${{ jobs.analyze.outputs.high_count }}
+      medium_count:
+        description: Number of unique medium Snyk Open Source issues.
+        value: ${{ jobs.analyze.outputs.medium_count }}
+      low_count:
+        description: Number of unique low Snyk Open Source issues.
+        value: ${{ jobs.analyze.outputs.low_count }}
+      code_issues_count:
+        description: Number of Snyk Code issues. Zero when the code scan is disabled.
+        value: ${{ jobs.analyze.outputs.code_issues_count }}
+      blocking_issues_count:
+        description: Number of Open Source and Code issues at or above severity_threshold.
+        value: ${{ jobs.analyze.outputs.blocking_issues_count }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Snyk analysis
+    runs-on: ${{ inputs.runner != '' && inputs.runner || (github.repository_owner == 'ninetwothree' && 'ubuntu-24-arm-runner' || 'ubuntu-24.04-arm') }}
+    timeout-minutes: 30
+    concurrency:
+      group: snyk-${{ github.repository }}-${{ github.ref }}-${{ inputs.working_directory }}
+      cancel-in-progress: true
+    outputs:
+      issues_count: ${{ steps.report.outputs.issues_count }}
+      critical_count: ${{ steps.report.outputs.critical_count }}
+      high_count: ${{ steps.report.outputs.high_count }}
+      medium_count: ${{ steps.report.outputs.medium_count }}
+      low_count: ${{ steps.report.outputs.low_count }}
+      code_issues_count: ${{ steps.report.outputs.code_issues_count }}
+      blocking_issues_count: ${{ steps.report.outputs.blocking_issues_count }}
+    env:
+      SNYK_DISABLE_ANALYTICS: "1"
+      SEVERITY_THRESHOLD: ${{ inputs.severity_threshold }}
+      EXCLUDE: ${{ inputs.exclude }}
+      DETECTION_DEPTH: ${{ inputs.detection_depth }}
+      ADDITIONAL_ARGS: ${{ inputs.additional_args }}
+      WORKING_DIRECTORY: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve analysis configuration
+        id: config
+        shell: bash
+        env:
+          INPUT_SNYK_ORG: ${{ inputs.snyk_org }}
+          INPUT_TARGET_REFERENCE: ${{ inputs.target_reference }}
+          INPUT_MONITOR: ${{ inputs.monitor }}
+          INPUT_SUMMARY_MAX_ISSUES: ${{ inputs.summary_max_issues }}
+          VAR_SNYK_ORG: ${{ vars.SNYK_ORG }}
+          VAR_SNYK_API: ${{ vars.SNYK_API }}
+          SECRET_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+
+          if [ -z "${SECRET_SNYK_TOKEN:-}" ]; then
+            missing+=("SNYK_TOKEN")
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing required configuration in the caller repository:"
+            printf ' - %s\n' "${missing[@]}"
+            echo "Set SNYK_TOKEN as a GitHub repository or organization secret and pass it to the workflow."
+            exit 1
+          fi
+
+          case "$SEVERITY_THRESHOLD" in
+            low|medium|high|critical) ;;
+            *)
+              echo "Unsupported severity_threshold: $SEVERITY_THRESHOLD (expected low, medium, high or critical)"
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$INPUT_SUMMARY_MAX_ISSUES" =~ ^[0-9]+$ ]]; then
+            echo "summary_max_issues must be a non-negative integer: $INPUT_SUMMARY_MAX_ISSUES"
+            exit 1
+          fi
+
+          if [ -n "$DETECTION_DEPTH" ] && [[ ! "$DETECTION_DEPTH" =~ ^[0-9]+$ ]]; then
+            echo "detection_depth must be a positive integer: $DETECTION_DEPTH"
+            exit 1
+          fi
+
+          if [ ! -d "$WORKING_DIRECTORY" ]; then
+            echo "Working directory not found: $WORKING_DIRECTORY"
+            exit 1
+          fi
+
+          snyk_org="${INPUT_SNYK_ORG:-${VAR_SNYK_ORG:-}}"
+
+          target_reference="${INPUT_TARGET_REFERENCE:-${HEAD_REF:-$GITHUB_REF_NAME}}"
+
+          monitor="$INPUT_MONITOR"
+          monitor_mode="enabled"
+          if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "pull_request_target" ]; then
+            monitor="false"
+            monitor_mode="skipped for pull requests"
+          elif [ "$monitor" != "true" ]; then
+            monitor_mode="disabled"
+          fi
+
+          results_dir="$RUNNER_TEMP/snyk-results"
+          mkdir -p "$results_dir"
+
+          {
+            echo "target_reference=$target_reference"
+            echo "monitor=$monitor"
+            echo "monitor_mode=$monitor_mode"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "RESULTS_DIR=$results_dir"
+            echo "TARGET_REFERENCE=$target_reference"
+            echo "REMOTE_REPO_URL=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          } >> "$GITHUB_ENV"
+
+          if [ -n "$snyk_org" ]; then
+            echo "SNYK_CFG_ORG=$snyk_org" >> "$GITHUB_ENV"
+          fi
+
+          if [ -n "${VAR_SNYK_API:-}" ]; then
+            echo "SNYK_API=$VAR_SNYK_API" >> "$GITHUB_ENV"
+          fi
+
+      - name: Use Node.js ${{ inputs.node_version }}
+        if: ${{ inputs.node_version != '' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node_version }}
+          package-manager-cache: false
+
+      - name: Enable Corepack
+        if: ${{ inputs.enable_corepack }}
+        shell: bash
+        run: corepack enable
+
+      - name: Use Python ${{ inputs.python_version }}
+        if: ${{ inputs.python_version != '' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install dependencies
+        if: ${{ inputs.install_command != '' }}
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          INSTALL_COMMAND: ${{ inputs.install_command }}
+        run: |
+          set -euo pipefail
+          bash -lc "$INSTALL_COMMAND"
+
+      - name: Install Snyk CLI
+        id: cli
+        shell: bash
+        env:
+          SNYK_CLI_VERSION: ${{ inputs.snyk_cli_version }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$SNYK_CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "snyk_cli_version must be an exact version such as 1.1307.4: $SNYK_CLI_VERSION"
+            exit 1
+          fi
+
+          case "$(uname -m)" in
+            x86_64|amd64) binary="snyk-linux" ;;
+            aarch64|arm64) binary="snyk-linux-arm64" ;;
+            *)
+              echo "Unsupported runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+
+          install_dir="$RUNNER_TEMP/snyk-cli"
+          mkdir -p "$install_dir"
+          cd "$install_dir"
+
+          base_url="https://static.snyk.io/cli/v${SNYK_CLI_VERSION}"
+          curl -fsSL --retry 3 "${base_url}/${binary}" -o "$binary"
+          curl -fsSL --retry 3 "${base_url}/${binary}.sha256" -o "${binary}.sha256"
+          sha256sum -c "${binary}.sha256"
+
+          mv "$binary" snyk
+          chmod +x snyk
+          echo "$install_dir" >> "$GITHUB_PATH"
+          ./snyk --version
+
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo apt-get install -y jq
+          fi
+
+      - name: Snyk Open Source test
+        id: test
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          read -ra extra_args <<< "$ADDITIONAL_ARGS"
+
+          args=(
+            --all-projects
+            --json-file-output="$RESULTS_DIR/snyk-open-source.json"
+            --sarif-file-output="$RESULTS_DIR/snyk-open-source.sarif"
+          )
+          [ -n "$EXCLUDE" ] && args+=(--exclude="$EXCLUDE")
+          [ -n "$DETECTION_DEPTH" ] && args+=(--detection-depth="$DETECTION_DEPTH")
+
+          set +e
+          snyk test "${args[@]}" "${extra_args[@]}" 2>&1 | tee "$RESULTS_DIR/snyk-open-source.txt"
+          exit_code="${PIPESTATUS[0]}"
+          set -e
+
+          case "$exit_code" in
+            0) status="passed" ;;
+            1) status="issues" ;;
+            3)
+              status="no-projects"
+              echo "::warning::Snyk found no supported manifests in $WORKING_DIRECTORY"
+              ;;
+            *)
+              status="error"
+              echo "::error::snyk test failed with exit code $exit_code"
+              ;;
+          esac
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Snyk monitor
+        id: monitor
+        if: ${{ steps.config.outputs.monitor == 'true' }}
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          PROJECT_ENVIRONMENT: ${{ inputs.project_environment }}
+          PROJECT_LIFECYCLE: ${{ inputs.project_lifecycle }}
+          PROJECT_BUSINESS_CRITICALITY: ${{ inputs.project_business_criticality }}
+          PROJECT_TAGS: ${{ inputs.project_tags }}
+        run: |
+          set -euo pipefail
+
+          read -ra extra_args <<< "$ADDITIONAL_ARGS"
+
+          args=(
+            --all-projects
+            --json
+            --target-reference="$TARGET_REFERENCE"
+            --remote-repo-url="$REMOTE_REPO_URL"
+          )
+          [ -n "$EXCLUDE" ] && args+=(--exclude="$EXCLUDE")
+          [ -n "$DETECTION_DEPTH" ] && args+=(--detection-depth="$DETECTION_DEPTH")
+          [ -n "$PROJECT_ENVIRONMENT" ] && args+=(--project-environment="$PROJECT_ENVIRONMENT")
+          [ -n "$PROJECT_LIFECYCLE" ] && args+=(--project-lifecycle="$PROJECT_LIFECYCLE")
+          [ -n "$PROJECT_BUSINESS_CRITICALITY" ] && args+=(--project-business-criticality="$PROJECT_BUSINESS_CRITICALITY")
+          [ -n "$PROJECT_TAGS" ] && args+=(--project-tags="$PROJECT_TAGS")
+
+          set +e
+          snyk monitor "${args[@]}" "${extra_args[@]}" > "$RESULTS_DIR/snyk-monitor.json"
+          exit_code="$?"
+          set -e
+
+          jq -r '
+            (if type == "array" then . else [.] end)[]
+            | if .error then "failed: \(.path // .projectName // "-"): \(.error)"
+              else "monitored: \(.projectName // .path // "-") -> \(.uri // .manageUrl // "-")" end
+          ' "$RESULTS_DIR/snyk-monitor.json" 2>/dev/null || cat "$RESULTS_DIR/snyk-monitor.json"
+
+          case "$exit_code" in
+            0) status="published" ;;
+            3)
+              status="no-projects"
+              echo "::warning::Snyk monitor found no supported manifests in $WORKING_DIRECTORY"
+              ;;
+            *)
+              status="error"
+              echo "::error::snyk monitor failed with exit code $exit_code"
+              ;;
+          esac
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Snyk Code test
+        id: code
+        if: ${{ inputs.enable_code_scan }}
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          MONITOR: ${{ steps.config.outputs.monitor }}
+          CODE_PROJECT_NAME: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          args=(--sarif-file-output="$RESULTS_DIR/snyk-code.sarif")
+          if [ "$MONITOR" = "true" ]; then
+            args+=(--report --project-name="$CODE_PROJECT_NAME" --target-reference="$TARGET_REFERENCE")
+          fi
+
+          set +e
+          snyk code test "${args[@]}" 2>&1 | tee "$RESULTS_DIR/snyk-code.txt"
+          exit_code="${PIPESTATUS[0]}"
+          set -e
+
+          case "$exit_code" in
+            0) status="passed" ;;
+            1) status="issues" ;;
+            3)
+              status="no-projects"
+              echo "::warning::Snyk Code found no supported source files in $WORKING_DIRECTORY"
+              ;;
+            *)
+              status="error"
+              echo "::error::snyk code test failed with exit code $exit_code"
+              ;;
+          esac
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Build Snyk report
+        id: report
+        if: ${{ always() && steps.cli.outcome == 'success' }}
+        shell: bash
+        env:
+          TEST_STATUS: ${{ steps.test.outputs.status }}
+          MONITOR_MODE: ${{ steps.config.outputs.monitor_mode }}
+          MONITOR_STATUS: ${{ steps.monitor.outputs.status }}
+          CODE_STATUS: ${{ steps.code.outputs.status }}
+          SUMMARY_MAX_ISSUES: ${{ inputs.summary_max_issues }}
+        run: |
+          set -euo pipefail
+
+          os_json="$RESULTS_DIR/snyk-open-source.json"
+          monitor_json="$RESULTS_DIR/snyk-monitor.json"
+          code_sarif="$RESULTS_DIR/snyk-code.sarif"
+          summary="$RESULTS_DIR/summary.md"
+
+          # shellcheck disable=SC2016
+          jq_lib='
+            def rank: {"low": 1, "medium": 2, "high": 3, "critical": 4}[.] // 0;
+            def md: tostring | gsub("\\|"; "\\|") | gsub("[\\r\\n]+"; " ");
+            def sev: (.severityWithCritical // .severity // "unknown");
+            def projects: if type == "array" then . else [.] end;
+            def issues: [projects[] | (.vulnerabilities // [])[]] | unique_by([.id, .packageName, .version]);
+            def code_level: {"error": "high", "warning": "medium", "note": "low"}[.] // "low";
+            def code_results: [(.runs // [])[] | (.results // [])[] | select((.suppressions // []) | length == 0)];
+          '
+
+          critical=0 high=0 medium=0 low=0 total=0 os_blocking=0
+          if [ -s "$os_json" ] && jq -e . "$os_json" >/dev/null 2>&1; then
+            read -r total critical high medium low os_blocking < <(jq -r --arg threshold "$SEVERITY_THRESHOLD" "$jq_lib"'
+              issues as $i
+              | [
+                  ($i | length),
+                  ([$i[] | select(sev == "critical")] | length),
+                  ([$i[] | select(sev == "high")] | length),
+                  ([$i[] | select(sev == "medium")] | length),
+                  ([$i[] | select(sev == "low")] | length),
+                  ([$i[] | select((sev | rank) >= ($threshold | rank))] | length)
+                ]
+              | @tsv
+            ' "$os_json")
+          fi
+
+          code_total=0 code_blocking=0
+          if [ -s "$code_sarif" ] && jq -e . "$code_sarif" >/dev/null 2>&1; then
+            read -r code_total code_blocking < <(jq -r --arg threshold "$SEVERITY_THRESHOLD" "$jq_lib"'
+              code_results as $r
+              | [($r | length), ([$r[] | select((.level | code_level | rank) >= ($threshold | rank))] | length)]
+              | @tsv
+            ' "$code_sarif")
+          fi
+
+          blocking=$((os_blocking + code_blocking))
+
+          {
+            echo "issues_count=$total"
+            echo "critical_count=$critical"
+            echo "high_count=$high"
+            echo "medium_count=$medium"
+            echo "low_count=$low"
+            echo "code_issues_count=$code_total"
+            echo "blocking_issues_count=$blocking"
+          } >> "$GITHUB_OUTPUT"
+
+          monitor_line="$MONITOR_MODE"
+          if [ -n "$MONITOR_STATUS" ]; then
+            monitor_line="$MONITOR_STATUS"
+          fi
+
+          {
+            echo "## Snyk Analysis"
+            echo
+            echo "- Repository: \`${GITHUB_REPOSITORY}\`"
+            echo "- Target reference: \`${TARGET_REFERENCE}\`"
+            echo "- Working directory: \`${WORKING_DIRECTORY}\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Snyk monitor: ${monitor_line}"
+            echo "- Blocking threshold: \`${SEVERITY_THRESHOLD}\` — ${blocking} blocking issue(s)"
+            echo
+
+            echo "### Open Source dependencies"
+            echo
+            case "${TEST_STATUS:-}" in
+              passed) echo "No known vulnerabilities found." ;;
+              no-projects) echo "No supported manifests were detected." ;;
+              error) echo "> [!WARNING]"; echo "> \`snyk test\` failed. See the job log for details." ;;
+              "") echo "Not executed." ;;
+            esac
+            echo
+
+            if [ "$total" -gt 0 ] || [ "${TEST_STATUS:-}" = "issues" ]; then
+              echo "| Critical | High | Medium | Low | Total |"
+              echo "| ---: | ---: | ---: | ---: | ---: |"
+              echo "| $critical | $high | $medium | $low | $total |"
+              echo
+            fi
+
+            if [ -s "$os_json" ] && jq -e . "$os_json" >/dev/null 2>&1; then
+              echo "<details><summary>Scanned projects</summary>"
+              echo
+              echo "| Manifest | Package manager | Dependencies | Critical | High | Medium | Low |"
+              echo "| --- | --- | ---: | ---: | ---: | ---: | ---: |"
+              jq -r "$jq_lib"'
+                projects[]
+                | select(.error | not)
+                | ((.vulnerabilities // []) | unique_by(.id)) as $v
+                | "| `\(.displayTargetFile // .targetFile // .path // "-" | md)` | \(.packageManager // "-") | \(.dependencyCount // 0) | \([$v[] | select(sev == "critical")] | length) | \([$v[] | select(sev == "high")] | length) | \([$v[] | select(sev == "medium")] | length) | \([$v[] | select(sev == "low")] | length) |"
+              ' "$os_json"
+              jq -r "$jq_lib"'
+                projects[]
+                | select(.error)
+                | "| `\(.path // .displayTargetFile // "-" | md)` | failed: \(.error | md) | | | | | |"
+              ' "$os_json"
+              echo
+              echo "</details>"
+              echo
+            fi
+
+            if [ "$total" -gt 0 ]; then
+              echo "#### Issues (top ${SUMMARY_MAX_ISSUES} by severity)"
+              echo
+              echo "| Severity | Package | Issue | Introduced via | Fix |"
+              echo "| --- | --- | --- | --- | --- |"
+              jq -r --argjson limit "$SUMMARY_MAX_ISSUES" "$jq_lib"'
+                issues
+                | sort_by([-(sev | rank), -(.cvssScore // 0)])
+                | .[:$limit][]
+                | "| \(sev) | `\(.packageName // "-")@\(.version // "-")` | [\(.title // .id | md)](https://security.snyk.io/vuln/\(.id)) | `\((.from // [])[1] // (.from // [])[0] // "-" | md)` | \(
+                    if .isUpgradable then "upgrade"
+                    elif ((.fixedIn // []) | length) > 0 then "fixed in \(.fixedIn | join(", ") | md)"
+                    elif .isPatchable then "patch"
+                    else "no fix" end
+                  ) |"
+              ' "$os_json"
+              if [ "$total" -gt "$SUMMARY_MAX_ISSUES" ]; then
+                echo
+                echo "_$((total - SUMMARY_MAX_ISSUES)) more issue(s) are available in the \`snyk-open-source.json\` artifact and in the Snyk UI._"
+              fi
+              echo
+            fi
+
+            if [ -s "$monitor_json" ] && jq -e . "$monitor_json" >/dev/null 2>&1; then
+              echo "### Snyk projects"
+              echo
+              jq -r "$jq_lib"'
+                projects[]
+                | if .error then "- failed: `\(.path // .projectName // "-" | md)` — \(.error | md)"
+                  elif (.uri // .manageUrl) then "- [\(.projectName // .path // "project" | md)](\(.uri // .manageUrl))"
+                  else empty end
+              ' "$monitor_json"
+              echo
+            fi
+
+            if [ -n "${CODE_STATUS:-}" ]; then
+              echo "### Snyk Code"
+              echo
+              case "$CODE_STATUS" in
+                passed) echo "No code issues found." ;;
+                no-projects) echo "No supported source files were detected." ;;
+                error) echo "> [!WARNING]"; echo "> \`snyk code test\` failed. See the job log for details." ;;
+              esac
+              if [ "$code_total" -gt 0 ]; then
+                echo "| Severity | Rule | Location | Message |"
+                echo "| --- | --- | --- | --- |"
+                jq -r --argjson limit "$SUMMARY_MAX_ISSUES" "$jq_lib"'
+                  code_results
+                  | sort_by(-(.level | code_level | rank))
+                  | .[:$limit][]
+                  | (.locations[0].physicalLocation // {}) as $loc
+                  | "| \(.level | code_level) | `\(.ruleId // "-")` | `\($loc.artifactLocation.uri // "-" | md):\($loc.region.startLine // 0)` | \(.message.text // "-" | .[:200] | md) |"
+                ' "$code_sarif"
+              fi
+              echo
+            fi
+          } > "$summary"
+
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Snyk results
+        if: ${{ always() && steps.config.outcome == 'success' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ runner.temp }}/snyk-results/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Enforce Snyk results
+        if: ${{ always() && steps.cli.outcome == 'success' }}
+        shell: bash
+        env:
+          TEST_STATUS: ${{ steps.test.outputs.status }}
+          MONITOR_STATUS: ${{ steps.monitor.outputs.status }}
+          CODE_STATUS: ${{ steps.code.outputs.status }}
+          FAIL_ON_ISSUES: ${{ inputs.fail_on_issues }}
+          BLOCKING_ISSUES_COUNT: ${{ steps.report.outputs.blocking_issues_count }}
+        run: |
+          set -euo pipefail
+
+          failures=()
+
+          [ "${TEST_STATUS:-}" = "error" ] && failures+=("snyk test failed")
+          [ "${MONITOR_STATUS:-}" = "error" ] && failures+=("snyk monitor failed")
+          [ "${CODE_STATUS:-}" = "error" ] && failures+=("snyk code test failed")
+
+          if [ "$FAIL_ON_ISSUES" = "true" ] && [ "${BLOCKING_ISSUES_COUNT:-0}" -gt 0 ]; then
+            failures+=("${BLOCKING_ISSUES_COUNT} issue(s) at or above ${SEVERITY_THRESHOLD} severity")
+          fi
+
+          if [ "${#failures[@]}" -gt 0 ]; then
+            printf '::error::%s\n' "${failures[@]}"
+            exit 1
+          fi
+
+          echo "Snyk analysis completed"

@@ -1,0 +1,52 @@
+name: Validate
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - develop
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate-workflows:
+    name: Validate workflows and action refs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Install actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTIONLINT_VERSION="1.7.7"
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}" -o "/tmp/${archive}"
+          tar -xzf "/tmp/${archive}" -C /tmp actionlint
+          sudo mv /tmp/actionlint /usr/local/bin/actionlint
+
+      - name: Run actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          actionlint .github/workflows/*.yml examples/*.yml
+
+      - name: Run shellcheck on repository scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck scripts/*.sh
+
+      - name: Validate action references
+        shell: bash
+        run: bash scripts/validate-action-refs.sh

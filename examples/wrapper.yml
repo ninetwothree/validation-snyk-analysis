@@ -1,0 +1,20 @@
+name: Snyk Analysis
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+      - uat
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snyk:
+    name: Reusable Snyk analysis
+    uses: ninetwothree/validation-snyk-analysis/.github/workflows/analyze.yml@v1.0
+    secrets:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}

@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+
+  prepare-release:
+    name: Calculate release version
+    needs: validate
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      tag_exists: ${{ steps.version.outputs.tag_exists }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+
+      - name: Determine next version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          existing_tag="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+$' | head -n1 || true)"
+          if [ -n "$existing_tag" ]; then
+            version="$existing_tag"
+            tag_exists="true"
+          else
+            version="$(scripts/next-version.sh "${GITHUB_REF_NAME}")"
+            tag_exists="false"
+          fi
+
+          prerelease="false"
+          if [ "${GITHUB_REF_NAME}" = "develop" ]; then
+            prerelease="true"
+          fi
+
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "tag_exists=$tag_exists"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Release summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Release summary"
+            echo "- Branch: ${GITHUB_REF_NAME}"
+            echo "- Version: ${{ steps.version.outputs.version }}"
+            echo "- Prerelease: ${{ steps.version.outputs.prerelease }}"
+            echo "- Tag already exists on HEAD: ${{ steps.version.outputs.tag_exists }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  create-release:
+    name: Create tag and GitHub release
+    needs: prepare-release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+
+      - name: Create git tag
+        if: needs.prepare-release.outputs.tag_exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ needs.prepare-release.outputs.version }}" -m "Release ${{ needs.prepare-release.outputs.version }}"
+          git push origin "${{ needs.prepare-release.outputs.version }}"
+
+      - name: Check if GitHub release already exists
+        id: release-exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${{ needs.prepare-release.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub prerelease
+        if: steps.release-exists.outputs.exists != 'true' && needs.prepare-release.outputs.prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${{ needs.prepare-release.outputs.version }}" \
+            --title "${{ needs.prepare-release.outputs.version }}" \
+            --generate-notes \
+            --prerelease
+
+      - name: Create GitHub release
+        if: steps.release-exists.outputs.exists != 'true' && needs.prepare-release.outputs.prerelease != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${{ needs.prepare-release.outputs.version }}" \
+            --title "${{ needs.prepare-release.outputs.version }}" \
+            --generate-notes

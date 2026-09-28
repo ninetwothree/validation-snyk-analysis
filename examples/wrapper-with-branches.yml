@@ -1,0 +1,64 @@
+name: Deploy Web to Azure Static Web Apps
+run-name: Azure deploy to ${{ github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || github.ref_name == 'uat' && 'uat' || 'qa') }} by @${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy to
+        required: true
+        default: qa
+        type: choice
+        options:
+          - qa
+          - uat
+          - prod
+  push:
+    branches:
+      - develop
+      - uat
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  determine-environment:
+    name: Resolve target environment
+    runs-on: ubuntu-24.04
+    outputs:
+      deploy_env: ${{ steps.set-env.outputs.deploy_env }}
+    steps:
+      - id: set-env
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            case "${{ github.ref_name }}" in
+              main) deploy_env="prod" ;;
+              uat) deploy_env="uat" ;;
+              *) deploy_env="qa" ;;
+            esac
+          else
+            deploy_env="${{ github.event.inputs.environment }}"
+          fi
+
+          echo "deploy_env=$deploy_env" >> "$GITHUB_OUTPUT"
+
+  snyk:
+    name: Reusable Snyk analysis
+    needs: determine-environment
+    uses: ninetwothree/validation-snyk-analysis/.github/workflows/analyze.yml@v1.0
+    with:
+      project_environment: frontend
+      project_lifecycle: ${{ needs.determine-environment.outputs.deploy_env == 'prod' && 'production' || 'development' }}
+      project_tags: environment=${{ needs.determine-environment.outputs.deploy_env }}
+    secrets:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  deploy:
+    name: Reusable Azure web deploy
+    needs: determine-environment
+    uses: ninetwothree/deployment-workflow-azure-web/.github/workflows/deploy.yml@v1.0
+    with:
+      environment: ${{ needs.determine-environment.outputs.deploy_env }}
+    secrets: inherit
