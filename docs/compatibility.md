@@ -16,6 +16,7 @@ Use `exclude` to skip directories such as `examples`, `test-fixtures`, or vendor
 
 - A Snyk organization for the caller projects.
 - A Snyk token with permission to test and monitor projects in that organization. Service account tokens are recommended.
+- When `project_environment`, `project_lifecycle`, `project_business_criticality`, or `project_tags` are passed, the token also needs the `Edit project attributes` and `Edit project tags` permissions (for example the Org Admin role or a custom role). The default Org Collaborator role does not include them.
 - Snyk Code enabled for the organization when `enable_code_scan` is true.
 
 ## GitHub-side prerequisites

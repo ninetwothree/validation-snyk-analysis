@@ -24,11 +24,11 @@ Reusable workflow path:
 | `project_lifecycle` | no | none | Snyk project lifecycle attribute: `production`, `development`, `sandbox` |
 | `project_business_criticality` | no | none | Snyk project business criticality attribute: `critical`, `high`, `medium`, `low` |
 | `project_tags` | no | none | Comma-separated `key=value` tags set on Snyk projects |
-| `node_version` | no | none | Node.js version to install. Node.js setup is skipped when empty |
-| `enable_corepack` | no | `false` | Whether to enable Corepack before installing dependencies |
-| `python_version` | no | none | Python version to install. Python setup is skipped when empty |
+| `python_version` | no | runner Python | Python version to install. When empty, the runner Python is used |
 | `install_command` | no | none | Dependency installation command executed in `working_directory` before the analysis |
 | `snyk_cli_version` | no | `1.1307.4` | Exact Snyk CLI version to install |
+| `force_legacy_cli` | no | `true` | Force the legacy Snyk Open Source test flow (`SNYK_FORCE_LEGACY_CLI`) instead of the Unified Test API |
+| `scan_timeout_minutes` | no | `10` | Maximum duration of each Snyk command in minutes |
 | `summary_max_issues` | no | `50` | Maximum number of issues listed in the job summary |
 | `artifact_name` | no | `snyk-results` | Name of the uploaded artifact with raw Snyk results |
 | `runner` | no | auto | Optional runner override |
@@ -72,7 +72,11 @@ The workflow uploads `artifact_name` with:
 ## Compatibility notes
 
 - Standard usage requires no `with:` inputs; only `SNYK_TOKEN` is required.
-- The workflow is report-only by default and fails only when a Snyk CLI command errors out.
+- The workflow is report-only by default and fails only when a Snyk CLI command errors out or times out.
+- `SNYK_TOKEN` is verified with `snyk whoami` before any scan, so an invalid token fails fast with troubleshooting hints.
+- `force_legacy_cli` defaults to `true`: for organizations where Snyk has enabled the Unified Test API rollout, `snyk test` polls a server-side test job that may never complete. Set it to `false` only after confirming the new flow finishes for the organization.
+- Project attributes and tags require the Snyk token to have the `Edit project attributes` / `Edit project tags` permissions. Without them Snyk rejects the whole monitor call with a misleading `Use snyk auth to authenticate` error; the workflow then retries once without attributes and tags and emits a warning.
+- Snyk resolves Python projects, including `poetry.lock`, through the `python` command. When the runner only has `python3`, the workflow links `python` to it automatically.
 - `snyk monitor` runs on `push`, `workflow_dispatch`, and other non-PR events; pull requests only get `snyk test`.
 - Issues are counted once per vulnerability ID, package, and version across all detected manifests.
 - Snyk Code severity is mapped from SARIF levels: `error` → `high`, `warning` → `medium`, `note` → `low`.

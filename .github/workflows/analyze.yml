@@ -73,18 +73,8 @@ on:
         required: false
         type: string
         default: ""
-      node_version:
-        description: Node.js version to install before the analysis. When empty, Node.js setup is skipped.
-        required: false
-        type: string
-        default: ""
-      enable_corepack:
-        description: Whether to enable Corepack before installing dependencies.
-        required: false
-        type: boolean
-        default: false
       python_version:
-        description: Python version to install before the analysis. When empty, Python setup is skipped.
+        description: Python version to install before the analysis. When empty, the runner Python is used.
         required: false
         type: string
         default: ""
@@ -98,6 +88,16 @@ on:
         required: false
         type: string
         default: "1.1307.4"
+      force_legacy_cli:
+        description: Whether to force the legacy Snyk Open Source test flow (SNYK_FORCE_LEGACY_CLI). The Unified Test API flow that Snyk rolls out per organization can poll a server-side test job indefinitely.
+        required: false
+        type: boolean
+        default: true
+      scan_timeout_minutes:
+        description: Maximum duration of each Snyk command in minutes.
+        required: false
+        type: string
+        default: "10"
       summary_max_issues:
         description: Maximum number of issues listed in the job summary.
         required: false
@@ -166,6 +166,7 @@ jobs:
       DETECTION_DEPTH: ${{ inputs.detection_depth }}
       ADDITIONAL_ARGS: ${{ inputs.additional_args }}
       WORKING_DIRECTORY: ${{ inputs.working_directory }}
+      SCAN_TIMEOUT_MINUTES: ${{ inputs.scan_timeout_minutes }}
     steps:
       - uses: actions/checkout@v5
 
@@ -177,6 +178,7 @@ jobs:
           INPUT_TARGET_REFERENCE: ${{ inputs.target_reference }}
           INPUT_MONITOR: ${{ inputs.monitor }}
           INPUT_SUMMARY_MAX_ISSUES: ${{ inputs.summary_max_issues }}
+          INPUT_FORCE_LEGACY_CLI: ${{ inputs.force_legacy_cli }}
           VAR_SNYK_ORG: ${{ vars.SNYK_ORG }}
           VAR_SNYK_API: ${{ vars.SNYK_API }}
           SECRET_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -208,6 +210,11 @@ jobs:
 
           if [[ ! "$INPUT_SUMMARY_MAX_ISSUES" =~ ^[0-9]+$ ]]; then
             echo "summary_max_issues must be a non-negative integer: $INPUT_SUMMARY_MAX_ISSUES"
+            exit 1
+          fi
+
+          if [[ ! "$SCAN_TIMEOUT_MINUTES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "scan_timeout_minutes must be a positive integer: $SCAN_TIMEOUT_MINUTES"
             exit 1
           fi
 
@@ -257,17 +264,9 @@ jobs:
             echo "SNYK_API=$VAR_SNYK_API" >> "$GITHUB_ENV"
           fi
 
-      - name: Use Node.js ${{ inputs.node_version }}
-        if: ${{ inputs.node_version != '' }}
-        uses: actions/setup-node@v5
-        with:
-          node-version: ${{ inputs.node_version }}
-          package-manager-cache: false
-
-      - name: Enable Corepack
-        if: ${{ inputs.enable_corepack }}
-        shell: bash
-        run: corepack enable
+          if [ "$INPUT_FORCE_LEGACY_CLI" = "true" ]; then
+            echo "SNYK_FORCE_LEGACY_CLI=1" >> "$GITHUB_ENV"
+          fi
 
       - name: Use Python ${{ inputs.python_version }}
         if: ${{ inputs.python_version != '' }}
@@ -326,6 +325,29 @@ jobs:
             sudo apt-get install -y jq
           fi
 
+          # Snyk resolves Python projects (including poetry.lock) through the `python` command.
+          if ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+            ln -s "$(command -v python3)" "$install_dir/python"
+            echo "Linked python -> $(command -v python3)"
+          fi
+
+      - name: Verify Snyk authentication
+        shell: bash
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if ! timeout 2m snyk whoami --experimental; then
+            echo "::error::Snyk rejected SNYK_TOKEN."
+            echo "Check that:"
+            echo " - SNYK_TOKEN contains the API token itself, not the organization or service account ID"
+            echo " - the service account uses the API token authentication type"
+            echo " - SNYK_API is set for regional tenants (for example https://api.eu.snyk.io)"
+            echo " - the token has not expired or been revoked"
+            exit 1
+          fi
+
       - name: Snyk Open Source test
         id: test
         shell: bash
@@ -346,9 +368,11 @@ jobs:
           [ -n "$DETECTION_DEPTH" ] && args+=(--detection-depth="$DETECTION_DEPTH")
 
           set +e
-          snyk test "${args[@]}" "${extra_args[@]}" 2>&1 | tee "$RESULTS_DIR/snyk-open-source.txt"
-          exit_code="${PIPESTATUS[0]}"
+          timeout --kill-after=30s "${SCAN_TIMEOUT_MINUTES}m" \
+            snyk test "${args[@]}" "${extra_args[@]}" > "$RESULTS_DIR/snyk-open-source.txt" 2>&1
+          exit_code="$?"
           set -e
+          cat "$RESULTS_DIR/snyk-open-source.txt"
 
           case "$exit_code" in
             0) status="passed" ;;
@@ -356,6 +380,10 @@ jobs:
             3)
               status="no-projects"
               echo "::warning::Snyk found no supported manifests in $WORKING_DIRECTORY"
+              ;;
+            124|137)
+              status="error"
+              echo "::error::snyk test timed out after ${SCAN_TIMEOUT_MINUTES} minute(s)"
               ;;
             *)
               status="error"
@@ -389,14 +417,26 @@ jobs:
           )
           [ -n "$EXCLUDE" ] && args+=(--exclude="$EXCLUDE")
           [ -n "$DETECTION_DEPTH" ] && args+=(--detection-depth="$DETECTION_DEPTH")
-          [ -n "$PROJECT_ENVIRONMENT" ] && args+=(--project-environment="$PROJECT_ENVIRONMENT")
-          [ -n "$PROJECT_LIFECYCLE" ] && args+=(--project-lifecycle="$PROJECT_LIFECYCLE")
-          [ -n "$PROJECT_BUSINESS_CRITICALITY" ] && args+=(--project-business-criticality="$PROJECT_BUSINESS_CRITICALITY")
-          [ -n "$PROJECT_TAGS" ] && args+=(--project-tags="$PROJECT_TAGS")
+
+          attribute_args=()
+          [ -n "$PROJECT_ENVIRONMENT" ] && attribute_args+=(--project-environment="$PROJECT_ENVIRONMENT")
+          [ -n "$PROJECT_LIFECYCLE" ] && attribute_args+=(--project-lifecycle="$PROJECT_LIFECYCLE")
+          [ -n "$PROJECT_BUSINESS_CRITICALITY" ] && attribute_args+=(--project-business-criticality="$PROJECT_BUSINESS_CRITICALITY")
+          [ -n "$PROJECT_TAGS" ] && attribute_args+=(--project-tags="$PROJECT_TAGS")
 
           set +e
-          snyk monitor "${args[@]}" "${extra_args[@]}" > "$RESULTS_DIR/snyk-monitor.json"
+          timeout --kill-after=30s "${SCAN_TIMEOUT_MINUTES}m" \
+            snyk monitor "${args[@]}" "${attribute_args[@]}" "${extra_args[@]}" > "$RESULTS_DIR/snyk-monitor.json"
           exit_code="$?"
+
+          # Snyk rejects the whole snapshot with a misleading "Use `snyk auth`" error when the token
+          # may not edit project attributes or tags, so retry once without them.
+          if [ "$exit_code" -eq 2 ] && [ "${#attribute_args[@]}" -gt 0 ]; then
+            echo "::warning::snyk monitor failed with project attributes/tags. Retrying without them; grant the Snyk token the 'Edit project attributes' and 'Edit project tags' permissions to apply them."
+            timeout --kill-after=30s "${SCAN_TIMEOUT_MINUTES}m" \
+              snyk monitor "${args[@]}" "${extra_args[@]}" > "$RESULTS_DIR/snyk-monitor.json"
+            exit_code="$?"
+          fi
           set -e
 
           jq -r '
@@ -410,6 +450,10 @@ jobs:
             3)
               status="no-projects"
               echo "::warning::Snyk monitor found no supported manifests in $WORKING_DIRECTORY"
+              ;;
+            124|137)
+              status="error"
+              echo "::error::snyk monitor timed out after ${SCAN_TIMEOUT_MINUTES} minute(s)"
               ;;
             *)
               status="error"
@@ -437,9 +481,11 @@ jobs:
           fi
 
           set +e
-          snyk code test "${args[@]}" 2>&1 | tee "$RESULTS_DIR/snyk-code.txt"
-          exit_code="${PIPESTATUS[0]}"
+          timeout --kill-after=30s "${SCAN_TIMEOUT_MINUTES}m" \
+            snyk code test "${args[@]}" > "$RESULTS_DIR/snyk-code.txt" 2>&1
+          exit_code="$?"
           set -e
+          cat "$RESULTS_DIR/snyk-code.txt"
 
           case "$exit_code" in
             0) status="passed" ;;
@@ -447,6 +493,10 @@ jobs:
             3)
               status="no-projects"
               echo "::warning::Snyk Code found no supported source files in $WORKING_DIRECTORY"
+              ;;
+            124|137)
+              status="error"
+              echo "::error::snyk code test timed out after ${SCAN_TIMEOUT_MINUTES} minute(s)"
               ;;
             *)
               status="error"
